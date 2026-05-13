@@ -1,0 +1,25 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/storage:/data/storage
+      - ./backend/adlocalizer.db:/data/adlocalizer.db
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: http://backend:8000
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev"
+    depends_on:
+      - backend

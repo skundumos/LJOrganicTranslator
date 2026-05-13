@@ -1,0 +1,27 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env.*.local
+*.log
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python-version
+
+# runtime artifacts
+backend/storage/
+backend/adlocalizer.db
+backend/adlocalizer.db-journal
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# reference videos (kept by user, not committed)
+*.mp4
+*.mov
+!backend/app/fonts/*.ttf
