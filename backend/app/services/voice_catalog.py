@@ -24,8 +24,10 @@ class LanguageMeta(TypedDict):
 
 # Default voice = "Rachel" tuned multilingual. Swap voice_ids per project preference.
 # These are real, public ElevenLabs voice IDs that support multilingual_v2.
-_DEFAULT_FEMALE = "21m00Tcm4TlvDq8ikWAM"   # Rachel (multilingual, warm)
-_DEFAULT_MALE = "TxGEqnHWrfWFTfGW9XjX"     # Josh (multilingual, energetic)
+# Free-tier accessible voices (in every account's personal voices list).
+# Library voices like Rachel/Josh require a paid plan for API access.
+_DEFAULT_FEMALE = "EXAVITQu4vr4xnSDxMaL"   # Sarah (default female, multilingual, warm)
+_DEFAULT_MALE = "TX3LPaxmHKxFdv7VOQHJ"     # Liam (default male, multilingual)
 
 LANGUAGES: list[LanguageMeta] = [
     {
