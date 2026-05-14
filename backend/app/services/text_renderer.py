@@ -37,8 +37,23 @@ def _font_path(language_code: str) -> Path:
         log.warning("Font %s missing; falling back to NotoSans-Bold.ttf", lang["noto_font"])
         return fallback
     raise FileNotFoundError(
-        f"No font found at {f}. Bundle Noto fonts into backend/app/fonts/ before rendering."
+        f"No font found at {f}. Run `python backend/scripts/download_fonts.py` to fetch the Noto fonts."
     )
+
+
+def _load_bold(font_file: Path, size: int) -> ImageFont.FreeTypeFont:
+    """Load a Noto font and lock the weight axis to Bold (700).
+
+    Our bundled files are variable fonts (wdth+wght axes) saved as *-Bold.ttf for
+    naming clarity. If the file is a non-variable static, set_variation_by_axes
+    raises OSError — we just fall through and use the file as-is.
+    """
+    font = ImageFont.truetype(str(font_file), size)
+    try:
+        font.set_variation_by_axes([100.0, 700.0])  # wdth=100 (normal), wght=700 (Bold)
+    except (OSError, AttributeError, ValueError):
+        pass  # static font — already the right weight (or not a variable font)
+    return font
 
 
 def _wrap(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
@@ -103,7 +118,7 @@ def render_text_png(
     # Binary search for largest font size that fits
     while lo <= hi:
         mid = (lo + hi) // 2
-        font = ImageFont.truetype(str(font_file), mid)
+        font = _load_bold(font_file, mid)
         lines = _wrap(text, font, target_w, measure_draw)
         w, h = _measure(lines, font, measure_draw, line_height_mult)
         if w <= target_w and h <= target_h:
@@ -114,7 +129,7 @@ def render_text_png(
             hi = mid - 4
 
     # If still overflowing at min size, tighten line height before giving up
-    font = ImageFont.truetype(str(font_file), chosen_size)
+    font = _load_bold(font_file, chosen_size)
     lines = _wrap(text, font, target_w, measure_draw)
     w, h = _measure(lines, font, measure_draw, line_height_mult)
     if h > target_h and line_height_mult > 1.05:
@@ -146,8 +161,10 @@ def render_text_png(
                 language=bcp47,
                 features=["liga", "calt"],
             )
-        except TypeError:
-            # Older Pillow / no libraqm: fall back without language+features.
+        except (TypeError, KeyError):
+            # Pillow without libraqm (typical on Windows): no HarfBuzz shaping. Indic conjuncts
+            # may not form correctly. For production-quality Indic rendering, run the backend in
+            # a Linux container with libraqm0 installed.
             draw.text(
                 (x, y_cursor),
                 line,
