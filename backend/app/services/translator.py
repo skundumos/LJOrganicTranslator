@@ -1,6 +1,10 @@
-"""LLM adapter. Uses Claude (Sonnet 4.6) if CLAUDE_API_KEY is set, otherwise OpenAI GPT-4o.
+"""LLM adapter. Priority chain: Groq → Claude → OpenAI.
 
-Both providers are invoked through a thin async wrapper that enforces JSON output.
+- Groq uses `llama-3.3-70b-versatile` via the OpenAI-compatible endpoint at api.groq.com.
+- Claude uses Sonnet 4.6.
+- OpenAI uses GPT-4o.
+
+All providers are invoked through a thin async wrapper that enforces JSON output.
 """
 from __future__ import annotations
 
@@ -41,6 +45,24 @@ def _parse_json(raw: str) -> dict[str, Any]:
         return json.loads(m.group(0))
 
 
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+
+async def _call_groq(messages: list[dict], max_tokens: int = 1024) -> str:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.GROQ_API_KEY, base_url=GROQ_BASE_URL)
+    resp = await client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.4,
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content or ""
+
+
 async def _call_claude(messages: list[dict], max_tokens: int = 1024) -> str:
     from anthropic import AsyncAnthropic
 
@@ -77,12 +99,19 @@ async def _call_openai(messages: list[dict], max_tokens: int = 1024) -> str:
     retry=retry_if_exception_type((TranslationError,)),
 )
 async def _call_llm(messages: list[dict], max_tokens: int = 1024) -> dict:
-    if settings.CLAUDE_API_KEY:
+    if settings.GROQ_API_KEY:
+        log.info("LLM provider: Groq (%s)", GROQ_MODEL)
+        raw = await _call_groq(messages, max_tokens=max_tokens)
+    elif settings.CLAUDE_API_KEY:
+        log.info("LLM provider: Claude (claude-sonnet-4-6)")
         raw = await _call_claude(messages, max_tokens=max_tokens)
     elif settings.OPENAI_API_KEY:
+        log.info("LLM provider: OpenAI (gpt-4o)")
         raw = await _call_openai(messages, max_tokens=max_tokens)
     else:
-        raise TranslationError("No LLM API key set (CLAUDE_API_KEY or OPENAI_API_KEY)")
+        raise TranslationError(
+            "No LLM API key set (need GROQ_API_KEY, CLAUDE_API_KEY, or OPENAI_API_KEY)"
+        )
     return _parse_json(raw)
 
 

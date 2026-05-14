@@ -13,6 +13,7 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from app.config import settings
 from app.db import session_scope
 from app.models import JobStatus, VideoJob
 from app.services import ocr_fallback, ocr_vision, stt_whisper, translator, tts_elevenlabs
@@ -113,12 +114,16 @@ async def run_prep_pipeline(job_id: int) -> None:
             _update(session, job, preview_frame_path=str(frame_path),
                     status=JobStatus.DETECTING_TEXT)
 
-            # OCR (Vision + bbox merge, OCR.space fallback for text only)
-            ocr = await ocr_vision.detect_overlay(frame_path)
-            if not ocr or not ocr.text:
+            # OCR. Priority chain: Google Vision (precise bbox) → OCR.space (text only + estimated bbox).
+            ocr = None
+            if settings.GOOGLE_VISION_API_KEY:
+                log.info("OCR provider: Google Vision (DOCUMENT_TEXT_DETECTION)")
+                ocr = await ocr_vision.detect_overlay(frame_path)
+
+            if (not ocr or not ocr.text) and settings.OCR_SPACE_API_KEY:
+                log.info("OCR provider: OCR.space (text-only, centered bbox estimated)")
                 fallback_text = await ocr_fallback.ocrspace_text(frame_path)
                 if fallback_text:
-                    log.info("OCR.space fallback supplied text only; geometry will be estimated.")
                     # Estimate a centered bbox covering the central 80% width, 25% height.
                     bw = int(meta.width * 0.8)
                     bh = int(meta.height * 0.25)

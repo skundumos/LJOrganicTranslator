@@ -21,10 +21,10 @@ Upload an MP4 (9:16, 15–60s, English voiceover, static centered overlay text, 
 
 - **Frontend:** Next.js 15 (App Router) + React 19 + TypeScript + Tailwind
 - **Backend:** FastAPI + Python 3.11 + SQLModel + SQLite, FastAPI `BackgroundTasks` for the job queue
-- **STT:** OpenAI Whisper API
-- **LLM:** Claude Sonnet 4.6 if `CLAUDE_API_KEY` set, else OpenAI GPT-4o
+- **STT:** Groq `whisper-large-v3` (free tier) if `GROQ_API_KEY` set, else OpenAI Whisper
+- **LLM:** Groq `llama-3.3-70b-versatile` → Claude Sonnet 4.6 → OpenAI GPT-4o (priority chain, whichever key is set)
 - **TTS:** ElevenLabs (curated voice ID per language)
-- **OCR:** Google Vision (primary) + OCR.space (fallback for text only)
+- **OCR:** Google Vision (precise bbox) if `GOOGLE_VISION_API_KEY` set, else OCR.space (free tier, text-only + estimated centered bbox)
 - **Video:** FFmpeg via `subprocess` — must be built with `libx264`, `librubberband`, `libfreetype`
 - **Text rendering:** Pillow ≥10 + libraqm (HarfBuzz shaping) → transparent PNG → FFmpeg `overlay` filter (FFmpeg `drawtext` does NOT shape Indic scripts correctly)
 
@@ -81,15 +81,31 @@ Get them from https://fonts.google.com/noto or the per-script `notofonts/<script
 cp backend/.env.example backend/.env
 ```
 
-Fill in:
+#### Free-tier setup (recommended for first run)
 
-```
-OPENAI_API_KEY=sk-...           # required for Whisper STT
-CLAUDE_API_KEY=sk-ant-...       # optional; if set, translation uses Claude
-ELEVENLABS_API_KEY=el-...       # required for voiceover
-GOOGLE_VISION_API_KEY=...       # required for OCR
-OCR_SPACE_API_KEY=...           # optional fallback
-```
+Three free signups, no credit card required:
+
+| Key | Where | Free tier | Covers |
+|---|---|---|---|
+| `GROQ_API_KEY` | https://console.groq.com/keys | 30 RPM chat / 20 RPM Whisper | LLM translation + Whisper STT |
+| `ELEVENLABS_API_KEY` | https://elevenlabs.io/app/settings/api-keys | 10k chars/month (~3–4 ads) | Voiceover |
+| `OCR_SPACE_API_KEY` | https://ocr.space/ocrapi/freekey | 25k requests/month | Overlay text detection |
+
+Fill those three into `backend/.env` and you're ready. The priority chain falls through to paid providers automatically when those keys are added — no code changes needed.
+
+#### Paid upgrades (optional)
+
+| Key | Where | What it upgrades |
+|---|---|---|
+| `CLAUDE_API_KEY` | https://console.anthropic.com/settings/keys | Translation uses Claude Sonnet 4.6 instead of Llama 3.3 (better South-Indian / Bengali quality) |
+| `OPENAI_API_KEY` | https://platform.openai.com/api-keys | Falls back to GPT-4o + Whisper-1 if Groq is unavailable |
+| `GOOGLE_VISION_API_KEY` | https://console.cloud.google.com/apis/credentials | Tighter overlay bounding box (paragraph-level Vision OCR vs centered estimate) |
+
+#### Selection priority
+
+- **LLM:** `GROQ_API_KEY` → `CLAUDE_API_KEY` → `OPENAI_API_KEY`
+- **STT:** `GROQ_API_KEY` → `OPENAI_API_KEY`
+- **OCR:** `GOOGLE_VISION_API_KEY` → `OCR_SPACE_API_KEY`
 
 ### Run
 
