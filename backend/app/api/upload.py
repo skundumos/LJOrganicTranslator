@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlmodel import Session
 
 from app.api._common import to_job_out
@@ -31,7 +31,6 @@ MAX_BYTES_DEFAULT = 200 * 1024 * 1024
 
 @router.post("/upload", response_model=JobOut)
 async def upload(
-    background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
     target_language: str = Form(...),
     session: Session = Depends(get_session),
@@ -83,12 +82,8 @@ async def upload(
     session.commit()
     session.refresh(job)
 
-    # Kick off the prep chain in the background. BackgroundTasks uses a coroutine wrapper.
+    # Kick off the prep chain in the background. Route is async, so runner.submit() finds
+    # the running event loop and schedules the coroutine as a tracked task.
     job_id = job.id or 0
-    background_tasks.add_task(_launch_prep, job_id)
-    return to_job_out(job)
-
-
-def _launch_prep(job_id: int) -> None:
-    # FastAPI BackgroundTasks runs sync functions in a threadpool; schedule the coroutine.
     runner.submit(lambda: run_prep_pipeline(job_id))
+    return to_job_out(job)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
@@ -53,13 +53,9 @@ def render_preview(
 
 
 @router.post("/render-final/{job_id}")
-def render_final_route(
-    job_id: int,
-    background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session),
-) -> dict:
+def render_final_route(job_id: int, session: Session = Depends(get_session)) -> dict:
     job = session.get(VideoJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    background_tasks.add_task(lambda: runner.submit(lambda: render_final_video(job_id)))
+    runner.submit(lambda: render_final_video(job_id))
     return {"ok": True, "job_id": job_id}

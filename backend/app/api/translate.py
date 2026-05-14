@@ -3,7 +3,7 @@ or update user-edited text.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from app.db import get_session
@@ -54,17 +54,13 @@ def update_script(
 
 
 @router.post("/translate-overlay/{job_id}")
-def regenerate_overlay_route(
-    job_id: int,
-    background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session),
-) -> dict:
+def regenerate_overlay_route(job_id: int, session: Session = Depends(get_session)) -> dict:
     job = session.get(VideoJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     if not job.detected_overlay_text:
         raise HTTPException(400, "No detected overlay text")
-    background_tasks.add_task(lambda: runner.submit(lambda: regenerate_overlay(job_id)))
+    runner.submit(lambda: regenerate_overlay(job_id))
     return {"ok": True}
 
 
