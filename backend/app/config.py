@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     CLAUDE_API_KEY: str = ""
-    ELEVENLABS_API_KEY: str = ""
+    SARVAM_API_KEY: str = ""
+    ELEVENLABS_API_KEY: str = ""  # legacy — kept for back-compat, no longer used by default
     GOOGLE_VISION_API_KEY: str = ""
     OCR_SPACE_API_KEY: str = ""
 

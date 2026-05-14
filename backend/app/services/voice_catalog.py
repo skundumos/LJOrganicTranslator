@@ -1,10 +1,15 @@
-"""Curated ElevenLabs voice IDs per supported language.
+"""Curated Sarvam Bulbul speakers per supported language.
 
-These voice IDs are picked from the ElevenLabs library for natural Indian-ad delivery
-on the eleven_multilingual_v2 model. ElevenLabs occasionally deprecates voices silently;
-the startup probe in pipeline.py verifies each ID still resolves.
+Sarvam Bulbul v2 ships native Indian voices that work across all supported Indian
+languages on the bulbul:v2 model. Anushka is a warm female voice well-suited to
+Instagram-style direct-to-camera ad delivery. Swap per language as preference dictates.
 
-Language codes are kept short and stable (used in DB rows + frontend URL params).
+Bulbul v2 speakers (as of 2026):
+  Female: anushka, manisha, vidya, arya
+  Male:   abhilash, karun, hitesh
+
+The `voice_id` field stores the Sarvam speaker name (not an ElevenLabs UUID anymore).
+The `bcp47` code is the `target_language_code` parameter passed to Sarvam's API.
 """
 from __future__ import annotations
 
@@ -15,19 +20,15 @@ class LanguageMeta(TypedDict):
     code: str
     display_name: str
     native_name: str
-    voice_id: str
+    voice_id: str                     # Sarvam speaker name (e.g., "anushka")
     voice_gender: str
-    expansion_factor: float          # avg char-length expansion vs English
-    bcp47: str                        # for Pillow text shaping
+    expansion_factor: float           # avg char-length expansion vs English
+    bcp47: str                        # target_language_code for Sarvam API + Pillow shaping
     noto_font: str                    # filename in backend/app/fonts/
 
 
-# Default voice = "Rachel" tuned multilingual. Swap voice_ids per project preference.
-# These are real, public ElevenLabs voice IDs that support multilingual_v2.
-# Free-tier accessible voices (in every account's personal voices list).
-# Library voices like Rachel/Josh require a paid plan for API access.
-_DEFAULT_FEMALE = "EXAVITQu4vr4xnSDxMaL"   # Sarah (default female, multilingual, warm)
-_DEFAULT_MALE = "TX3LPaxmHKxFdv7VOQHJ"     # Liam (default male, multilingual)
+_DEFAULT_FEMALE = "anushka"  # warm conversational, ad-style
+_DEFAULT_MALE = "abhilash"
 
 LANGUAGES: list[LanguageMeta] = [
     {
@@ -36,6 +37,8 @@ LANGUAGES: list[LanguageMeta] = [
         "expansion_factor": 1.15, "bcp47": "hi-IN", "noto_font": "NotoSansDevanagari-Bold.ttf",
     },
     {
+        # Hinglish: Sarvam doesn't have a dedicated code-mixed code. en-IN handles English
+        # words with Indian accent and tolerates Romanized Hindi inserts reasonably.
         "code": "hinglish", "display_name": "Hinglish", "native_name": "Hinglish",
         "voice_id": _DEFAULT_FEMALE, "voice_gender": "female",
         "expansion_factor": 1.05, "bcp47": "en-IN", "noto_font": "NotoSans-Bold.ttf",

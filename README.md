@@ -23,7 +23,7 @@ Upload an MP4 (9:16, 15–60s, English voiceover, static centered overlay text, 
 - **Backend:** FastAPI + Python 3.11 + SQLModel + SQLite, FastAPI `BackgroundTasks` for the job queue
 - **STT:** Groq `whisper-large-v3` (free tier) if `GROQ_API_KEY` set, else OpenAI Whisper
 - **LLM:** Groq `llama-3.3-70b-versatile` → Claude Sonnet 4.6 → OpenAI GPT-4o (priority chain, whichever key is set)
-- **TTS:** ElevenLabs (curated voice ID per language)
+- **TTS:** Sarvam Bulbul v2 (native Indian-language voices — `anushka` default). ElevenLabs is kept in the codebase as `tts_elevenlabs.py` for fallback but no longer wired.
 - **OCR:** Google Vision (precise bbox) if `GOOGLE_VISION_API_KEY` set, else OCR.space (free tier, text-only + estimated centered bbox)
 - **Video:** FFmpeg via `subprocess` — must be built with `libx264`, `librubberband`, `libfreetype`
 - **Text rendering:** Pillow ≥10 + libraqm (HarfBuzz shaping) → transparent PNG → FFmpeg `overlay` filter (FFmpeg `drawtext` does NOT shape Indic scripts correctly)
@@ -88,7 +88,7 @@ Three free signups, no credit card required:
 | Key | Where | Free tier | Covers |
 |---|---|---|---|
 | `GROQ_API_KEY` | https://console.groq.com/keys | 30 RPM chat / 20 RPM Whisper | LLM translation + Whisper STT |
-| `ELEVENLABS_API_KEY` | https://elevenlabs.io/app/settings/api-keys | 10k chars/month (~3–4 ads) | Voiceover |
+| `SARVAM_API_KEY` | https://dashboard.sarvam.ai | Free trial credits | Native Indian-language voiceover (Bulbul v2) |
 | `OCR_SPACE_API_KEY` | https://ocr.space/ocrapi/freekey | 25k requests/month | Overlay text detection |
 
 Fill those three into `backend/.env` and you're ready. The priority chain falls through to paid providers automatically when those keys are added — no code changes needed.

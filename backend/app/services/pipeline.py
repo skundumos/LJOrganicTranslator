@@ -16,7 +16,7 @@ from sqlmodel import Session
 from app.config import settings
 from app.db import session_scope
 from app.models import JobStatus, VideoJob
-from app.services import ocr_fallback, ocr_vision, stt_whisper, translator, tts_elevenlabs
+from app.services import ocr_fallback, ocr_vision, stt_whisper, translator, tts_sarvam as tts
 from app.services.ffmpeg_ops import (
     FFmpegError,
     build_blurred_background_frame,
@@ -97,7 +97,7 @@ async def run_prep_pipeline(job_id: int) -> None:
 
             # Voiceover generation (duration-matched)
             voice_path = job_dir / "voiceover.mp3"
-            voice_path, voice_dur = await tts_elevenlabs.generate_voiceover(
+            voice_path, voice_dur = await tts.generate_voiceover(
                 scripts["natural"], job.target_language, meta.duration_s,
                 voice_path, compact_text=scripts["compact"],
             )
@@ -179,7 +179,7 @@ async def regenerate_voiceover(job_id: int, script_override: str | None = None) 
             compact = job.translated_script_compact
             job_dir = storage.job_dir(job_id)
             voice_path = job_dir / "voiceover.mp3"
-            voice_path, voice_dur = await tts_elevenlabs.generate_voiceover(
+            voice_path, voice_dur = await tts.generate_voiceover(
                 text, job.target_language, job.original_duration_s or 30.0,
                 voice_path, compact_text=compact,
             )

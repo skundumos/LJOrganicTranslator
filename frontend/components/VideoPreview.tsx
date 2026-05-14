@@ -10,9 +10,16 @@ export function VideoPreview({ src, label }: Props) {
   return (
     <div className="card p-4">
       {label && <div className="chip mb-2">{label}</div>}
-      <div className="rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] max-w-[360px] mx-auto">
+      <div className="rounded-lg overflow-hidden border border-border bg-black mx-auto" style={{ maxWidth: "min(100%, 480px)" }}>
         {/* eslint-disable-next-line @next/next/no-unknown-property */}
-        <video src={src} controls className="w-full h-full" playsInline preload="metadata" />
+        <video
+          src={src}
+          controls
+          controlsList="nodownload"
+          className="w-full h-auto block"
+          playsInline
+          preload="metadata"
+        />
       </div>
     </div>
   );
