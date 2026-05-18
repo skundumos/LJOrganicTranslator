@@ -20,6 +20,13 @@ export type BoundingBox = {
   font_size_hint: number;
 };
 
+export type OverlayRegion = {
+  detected: string;
+  translated: string | null;
+  bbox: BoundingBox;
+  confidence?: number | null;
+};
+
 export type Job = {
   id: number;
   status: JobStatus;
@@ -32,6 +39,7 @@ export type Job = {
   detected_overlay_text: string | null;
   translated_overlay_text: string | null;
   bbox: BoundingBox | null;
+  regions: OverlayRegion[];
   has_preview_frame: boolean;
   has_voiceover: boolean;
   has_final_video: boolean;
@@ -55,30 +63,46 @@ async function asJson<T>(r: Response): Promise<T> {
   return r.json();
 }
 
+// The Next.js dev rewrite proxy buffers request bodies in memory and caps them at 10 MB,
+// which would truncate any video larger than that. For the one large-payload endpoint
+// (upload) we bypass the proxy and POST straight to the backend — CORS is already
+// configured for http://localhost:3001 in backend/.env. Other endpoints (small JSON
+// payloads, file responses) keep going through the proxy so prod deploys behind a single
+// origin still work unchanged.
+const UPLOAD_DIRECT_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ??
+  (typeof window !== "undefined" && window.location.hostname === "localhost"
+    ? "http://localhost:8000"
+    : "");
+
 export const api = {
   upload: async (file: File, language: string): Promise<Job> => {
     const fd = new FormData();
     fd.append("video", file);
     fd.append("target_language", language);
-    return asJson<Job>(await fetch("/api/upload", { method: "POST", body: fd }));
+    return asJson<Job>(
+      await fetch(`${UPLOAD_DIRECT_BASE}/api/upload`, { method: "POST", body: fd }),
+    );
   },
 
   job: async (id: number): Promise<Job> =>
     asJson<Job>(await fetch(`/api/job/${id}`)),
 
-  updateOverlay: async (id: number, text: string) =>
+  updateOverlay: async (id: number, text: string, regionIndex?: number) =>
     asJson<{ ok: boolean }>(
       await fetch(`/api/translate-overlay/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, region_index: regionIndex ?? null }),
       }),
     ),
 
-  regenerateOverlay: async (id: number) =>
-    asJson<{ ok: boolean }>(
-      await fetch(`/api/translate-overlay/${id}`, { method: "POST" }),
-    ),
+  regenerateOverlay: async (id: number, regionIndex?: number) => {
+    const qs = regionIndex !== undefined ? `?region_index=${regionIndex}` : "";
+    return asJson<{ ok: boolean }>(
+      await fetch(`/api/translate-overlay/${id}${qs}`, { method: "POST" }),
+    );
+  },
 
   updateScript: async (id: number, text: string) =>
     asJson<{ ok: boolean; translated_script: string }>(
@@ -103,11 +127,11 @@ export const api = {
       }),
     ),
 
-  renderPreview: async (id: number, text: string): Promise<string> => {
+  renderPreview: async (id: number, text: string, regionIndex?: number): Promise<string> => {
     const r = await fetch(`/api/render-preview/${id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, region_index: regionIndex ?? null }),
     });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     const blob = await r.blob();

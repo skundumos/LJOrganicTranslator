@@ -11,6 +11,13 @@ class BoundingBoxOut(BaseModel):
     font_size_hint: int
 
 
+class RegionOut(BaseModel):
+    detected: str
+    translated: str | None
+    bbox: BoundingBoxOut
+    confidence: float | None = None
+
+
 class JobOut(BaseModel):
     id: int
     status: JobStatus
@@ -23,6 +30,7 @@ class JobOut(BaseModel):
     detected_overlay_text: str | None
     translated_overlay_text: str | None
     bbox: BoundingBoxOut | None
+    regions: list[RegionOut]
     has_preview_frame: bool
     has_voiceover: bool
     has_final_video: bool
@@ -37,6 +45,7 @@ class TranslateScriptIn(BaseModel):
 
 class UpdateOverlayIn(BaseModel):
     text: str
+    region_index: int | None = None
 
 
 class UpdateScriptIn(BaseModel):
@@ -45,6 +54,7 @@ class UpdateScriptIn(BaseModel):
 
 class RenderPreviewIn(BaseModel):
     text: str
+    region_index: int | None = None
 
 
 class RegenerateVoiceoverIn(BaseModel):

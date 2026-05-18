@@ -39,8 +39,15 @@ _API = "https://api.sarvam.ai/text-to-speech"
 _MODEL = "bulbul:v2"
 _MAX_CHUNK_CHARS = 450  # safe under Sarvam's per-request soft cap of ~500
 
-_ATEMPO_BAND = (0.93, 1.08)
-_RUBBERBAND_BAND = (0.82, 1.22)
+# Naturalness-first duration matching:
+#   - If the natural-variant read lands within `_NO_STRETCH_BAND`, ship it untouched.
+#   - Otherwise, regenerate from the compact variant and pick whichever is closer.
+#   - If still outside the no-stretch band, apply a minimal time-stretch clamped to
+#     `_STRETCH_CLAMP` (>10% stretch sounds unnatural — beyond that we let the silence
+#     pad in `_pad_to_duration` handle the residual gap, and the user can shorten the
+#     script if they care about syncing tighter).
+_NO_STRETCH_BAND = (0.95, 1.05)
+_STRETCH_CLAMP = (0.92, 1.10)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -151,16 +158,57 @@ def _concat_with_crossfade(chunks: list[Path], out_mp3: Path) -> Path:
 
 
 def _trim_silence(in_mp3: Path, out_mp3: Path) -> Path:
+    """Strip leading/trailing silence, then apply a short fade in/out so the head and tail
+    don't pop when mixed against the source bed."""
+    intermediate = out_mp3.with_name(out_mp3.stem + "_trim.mp3")
     cmd = [
         settings.FFMPEG_BIN, "-y", "-i", str(in_mp3),
         "-af",
         "silenceremove=start_periods=1:start_silence=0.2:start_threshold=-45dB:"
         "stop_periods=-1:stop_silence=0.2:stop_threshold=-45dB",
         "-c:a", "libmp3lame", "-b:a", "192k",
+        str(intermediate),
+    ]
+    _run(cmd, timeout=60)
+
+    dur = probe_audio_duration(intermediate)
+    fade = 0.06
+    if dur <= fade * 2 + 0.05:
+        # Too short to fade meaningfully — keep as-is.
+        shutil.copyfile(intermediate, out_mp3)
+        intermediate.unlink(missing_ok=True)
+        return out_mp3
+
+    fade_out_start = max(0.0, dur - fade)
+    cmd = [
+        settings.FFMPEG_BIN, "-y", "-i", str(intermediate),
+        "-af",
+        f"afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade:.3f}",
+        "-c:a", "libmp3lame", "-b:a", "192k",
         str(out_mp3),
     ]
     _run(cmd, timeout=60)
+    intermediate.unlink(missing_ok=True)
     return out_mp3
+
+
+def _pad_to_duration(audio_in: Path, target_seconds: float) -> None:
+    """Pad `audio_in` with trailing silence so its duration is exactly `target_seconds`.
+
+    No-op if the audio is already at or beyond target. Rewrites in place via a temp file.
+    """
+    current = probe_audio_duration(audio_in)
+    if current >= target_seconds - 0.02:
+        return
+    tmp = audio_in.with_name(audio_in.stem + "_padded.mp3")
+    cmd = [
+        settings.FFMPEG_BIN, "-y", "-i", str(audio_in),
+        "-af", f"apad=whole_dur={target_seconds:.3f}",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        str(tmp),
+    ]
+    _run(cmd, timeout=60)
+    shutil.move(str(tmp), str(audio_in))
 
 
 async def generate_voiceover(
@@ -209,33 +257,58 @@ async def generate_voiceover(
             return final, dur
 
     natural_path, natural_dur = await _generate(text, "natural")
-    ratio = natural_dur / target_seconds
+    natural_ratio = natural_dur / target_seconds
     log.info("Sarvam natural duration ratio=%.3f (got %.2fs / target %.2fs)",
-             ratio, natural_dur, target_seconds)
+             natural_ratio, natural_dur, target_seconds)
 
     chosen_path, chosen_dur = natural_path, natural_dur
 
-    if (ratio < _RUBBERBAND_BAND[0] or ratio > _RUBBERBAND_BAND[1]) and compact_text:
-        log.info("Ratio outside [%.2f,%.2f]; regenerating from compact variant.",
-                 *_RUBBERBAND_BAND)
+    # Prefer regenerating from the compact variant over stretching — a tighter script
+    # read at natural pace sounds far better than an awkwardly-stretched longer read.
+    if not (_NO_STRETCH_BAND[0] <= natural_ratio <= _NO_STRETCH_BAND[1]) and compact_text:
+        log.info(
+            "Natural ratio %.3f outside no-stretch band [%.2f,%.2f]; trying compact.",
+            natural_ratio, *_NO_STRETCH_BAND,
+        )
         compact_path, compact_dur = await _generate(compact_text, "compact")
         if abs(compact_dur - target_seconds) < abs(natural_dur - target_seconds):
             chosen_path, chosen_dur = compact_path, compact_dur
 
-    final_ratio = chosen_dur / target_seconds
-    if final_ratio < _ATEMPO_BAND[0] or final_ratio > _ATEMPO_BAND[1]:
-        tempo = chosen_dur / target_seconds
-        tempo = max(_RUBBERBAND_BAND[0], min(_RUBBERBAND_BAND[1], tempo))
-        log.info("Applying time-stretch tempo=%.3f (rubberband=%s)", tempo, has_rubberband)
+    chosen_ratio = chosen_dur / target_seconds
+    if _NO_STRETCH_BAND[0] <= chosen_ratio <= _NO_STRETCH_BAND[1]:
+        log.info("Within no-stretch band (ratio=%.3f); using natural-paced read as-is.",
+                 chosen_ratio)
+        shutil.copyfile(chosen_path, out_mp3)
+    else:
+        # Minimal stretch, clamped — anything >10% sounds clearly stretched.
+        tempo = max(_STRETCH_CLAMP[0], min(_STRETCH_CLAMP[1], chosen_ratio))
+        log.info(
+            "Applying minimal time-stretch tempo=%.3f (clamped to [%.2f,%.2f], rubberband=%s)",
+            tempo, *_STRETCH_CLAMP, has_rubberband,
+        )
         try:
             time_stretch(chosen_path, out_mp3, tempo, has_rubberband)
         except FFmpegError:
             log.exception("time_stretch failed; using untouched audio")
             shutil.copyfile(chosen_path, out_mp3)
-    else:
-        shutil.copyfile(chosen_path, out_mp3)
+
+    # Pad with trailing silence so the voiceover spans the full video duration. With this,
+    # the final render's amix runs against equal-length streams and we can drop `-shortest`
+    # without risking a truncated bed.
+    pre_pad_dur = probe_audio_duration(out_mp3)
+    if pre_pad_dur < target_seconds - 0.15:
+        log.info("Padding voiceover from %.2fs to %.2fs to match video length.",
+                 pre_pad_dur, target_seconds)
+        _pad_to_duration(out_mp3, target_seconds)
 
     final_dur = probe_audio_duration(out_mp3)
     log.info("Final Sarvam voiceover: %.2fs (target %.2fs, ratio %.3f)",
              final_dur, target_seconds, final_dur / target_seconds)
+
+    if pre_pad_dur < target_seconds * 0.9:
+        log.warning(
+            "Pre-pad voiceover was %.2fs / target %.2fs (%.0f%%). Translated script may be "
+            "too short — consider regenerating with the natural variant.",
+            pre_pad_dur, target_seconds, 100 * pre_pad_dur / target_seconds,
+        )
     return out_mp3, final_dur

@@ -23,6 +23,7 @@ from app.services.ffmpeg_ops import (
     extract_audio,
     extract_frame,
     probe,
+    probe_audio_duration,
     render_final,
 )
 from app.services.storage import storage
@@ -108,52 +109,119 @@ async def run_prep_pipeline(job_id: int) -> None:
                 status=JobStatus.EXTRACTING_FRAME,
             )
 
-            # Extract a representative frame at t=1s (or earlier if clip is short)
-            t = min(1.0, max(0.3, meta.duration_s * 0.1))
-            frame_path = extract_frame(Path(job.original_video_path), t, job_dir / "frame.png")
-            _update(session, job, preview_frame_path=str(frame_path),
+            # Extract THREE frames across the clip, not one. A single frame at t=1s misses
+            # overlays that appear later, or any frame that landed on a motion-blur. We OCR
+            # each, then keep the highest-confidence region per band (top/bottom) across the
+            # whole sample set.
+            min_t = 0.3
+            max_t = max(min_t + 0.1, meta.duration_s - 0.3)
+            sample_offsets = [0.15, 0.50, 0.85]
+            sample_ts = sorted({
+                round(max(min_t, min(max_t, meta.duration_s * f)), 2)
+                for f in sample_offsets
+            })
+            sample_frames: list[Path] = []
+            for i, t in enumerate(sample_ts):
+                fp = job_dir / f"frame_{i}.png"
+                extract_frame(Path(job.original_video_path), t, fp)
+                sample_frames.append(fp)
+            # Default preview frame: the middle sample. Updated below to the frame that
+            # sourced our chosen regions, so what the user sees in the editor matches what
+            # the final render will look like.
+            preview_path = sample_frames[len(sample_frames) // 2]
+            _update(session, job, preview_frame_path=str(preview_path),
                     status=JobStatus.DETECTING_TEXT)
 
             # OCR. Priority chain: Google Vision (precise bbox) → OCR.space (text only + estimated bbox).
-            ocr = None
-            if settings.GOOGLE_VISION_API_KEY:
-                log.info("OCR provider: Google Vision (DOCUMENT_TEXT_DETECTION)")
-                ocr = await ocr_vision.detect_overlay(frame_path)
+            # Both return a LIST of regions (top + bottom) when present, so ads with text above
+            # AND below the product get both replaced.
+            img_h = meta.height
+            best_by_band: dict[str, tuple[ocr_vision.OcrResult, Path]] = {}
 
-            if (not ocr or not ocr.text) and settings.OCR_SPACE_API_KEY:
-                log.info("OCR provider: OCR.space (text-only, centered bbox estimated)")
-                fallback_text = await ocr_fallback.ocrspace_text(frame_path)
-                if fallback_text:
-                    # Estimate a centered bbox covering the central 80% width, 25% height.
-                    bw = int(meta.width * 0.8)
-                    bh = int(meta.height * 0.25)
-                    bx = (meta.width - bw) // 2
-                    by = int(meta.height * 0.45)
-                    ocr = ocr_vision.OcrResult(
-                        text=fallback_text, bbox=(bx, by, bw, bh),
-                        font_size_hint=max(48, bh // 4), confidence=0.4,
+            for fp in sample_frames:
+                regions_i: list = []
+                if settings.GOOGLE_VISION_API_KEY:
+                    log.info("OCR provider: Google Vision on %s", fp.name)
+                    regions_i = await ocr_vision.detect_overlay_regions(fp)
+                if not regions_i and settings.OCR_SPACE_API_KEY:
+                    log.info("OCR provider: OCR.space on %s", fp.name)
+                    space_regions = await ocr_fallback.detect_overlay_regions(
+                        fp, meta.width, meta.height
                     )
+                    regions_i = [
+                        ocr_vision.OcrResult(
+                            text=r.text, bbox=r.bbox,
+                            font_size_hint=r.font_size_hint, confidence=0.5,
+                        )
+                        for r in space_regions
+                    ]
+                for r in regions_i:
+                    cy = r.bbox[1] + r.bbox[3] / 2
+                    band = "top" if cy < img_h * 0.5 else "bot"
+                    existing = best_by_band.get(band)
+                    if existing is None or r.confidence > existing[0].confidence:
+                        best_by_band[band] = (r, fp)
 
-            if ocr:
-                x, y, w, h = ocr.bbox
-                _update(
-                    session, job,
-                    detected_overlay_text=ocr.text,
-                    bbox_x=x, bbox_y=y, bbox_width=w, bbox_height=h,
-                    font_size_hint=ocr.font_size_hint,
-                    status=JobStatus.TRANSLATING_OVERLAY,
-                )
+            regions: list = sorted(
+                (entry[0] for entry in best_by_band.values()),
+                key=lambda r: r.bbox[1],
+            )
 
-                # Pre-build the blurred background frame (used by live preview)
+            # Re-pick the preview frame: the sample that sourced our highest-confidence
+            # region. The blur happens dynamically per video frame in render_final, but the
+            # editor preview composites on a still — match the still to the OCR source so
+            # the user sees the bbox over its actual text.
+            if best_by_band:
+                chosen_source = max(
+                    best_by_band.values(), key=lambda v: v[0].confidence,
+                )[1]
+                if chosen_source != preview_path:
+                    preview_path = chosen_source
+                    _update(session, job, preview_frame_path=str(preview_path))
+
+            if regions:
+                bboxes = [r.bbox for r in regions]
+
+                # Pre-build the background frame with ALL detected regions blurred
                 bg = job_dir / "background_blurred.png"
-                build_blurred_background_frame(frame_path, (x, y, w, h), bg)
+                build_blurred_background_frame(preview_path, bboxes, bg)
                 _update(session, job, background_frame_path=str(bg))
 
-                # Translate overlay
-                translated_overlay = await translator.translate_overlay(
-                    ocr.text, job.target_language
+                # Translate each region's text independently. Pass bbox + font hint so the
+                # translator can probe-render and retry with a tighter budget when the
+                # auto-fit would otherwise shrink text below the legibility floor.
+                translated_per_region: list[str] = []
+                for r in regions:
+                    t = await translator.translate_overlay(
+                        r.text, job.target_language,
+                        bbox_w=r.bbox[2], bbox_h=r.bbox[3],
+                        font_size_hint=r.font_size_hint,
+                    )
+                    translated_per_region.append(t)
+
+                # Persist regions list + mirror first region to legacy fields
+                regions_payload = [
+                    {
+                        "detected": r.text,
+                        "translated": translated_per_region[i],
+                        "bbox": {"x": r.bbox[0], "y": r.bbox[1],
+                                 "w": r.bbox[2], "h": r.bbox[3]},
+                        "font_size_hint": r.font_size_hint,
+                        "confidence": r.confidence,
+                    }
+                    for i, r in enumerate(regions)
+                ]
+                first = regions[0]
+                x, y, w, h = first.bbox
+                _update(
+                    session, job,
+                    regions=regions_payload,
+                    detected_overlay_text="\n---\n".join(r.text for r in regions),
+                    translated_overlay_text="\n---\n".join(translated_per_region),
+                    bbox_x=x, bbox_y=y, bbox_width=w, bbox_height=h,
+                    font_size_hint=first.font_size_hint,
+                    status=JobStatus.TRANSLATING_OVERLAY,
                 )
-                _update(session, job, translated_overlay_text=translated_overlay)
             else:
                 log.warning("Job %s: no overlay text detected — proceeding without overlay step.", job_id)
                 _update(session, job, status=JobStatus.TRANSLATING_OVERLAY)
@@ -198,17 +266,56 @@ async def regenerate_voiceover(job_id: int, script_override: str | None = None) 
 # Step 3: regenerate overlay translation (LLM only)
 # ---------------------------------------------------------------------------
 
-async def regenerate_overlay(job_id: int) -> None:
+async def regenerate_overlay(job_id: int, region_index: int | None = None) -> None:
+    """Re-translate overlay region(s).
+
+    If region_index is None, re-translate every region in `regions`.
+    If an index is given, re-translate just that region.
+    Falls back to the legacy single-string field when `regions` is absent.
+    """
     with session_scope() as session:
         try:
             job = _load(session, job_id)
-            if not job.detected_overlay_text:
-                raise RuntimeError("No detected overlay text to translate")
-            translated = await translator.translate_overlay(
-                job.detected_overlay_text, job.target_language
-            )
-            _update(session, job, translated_overlay_text=translated,
-                    status=JobStatus.AWAITING_REVIEW)
+            regions = list(job.regions) if job.regions else []
+
+            if regions:
+                indices = [region_index] if region_index is not None else range(len(regions))
+                for idx in indices:
+                    if idx < 0 or idx >= len(regions):
+                        continue
+                    detected = regions[idx].get("detected") or ""
+                    if not detected:
+                        continue
+                    bb = regions[idx].get("bbox") or {}
+                    bw = int(bb.get("w") or 0)
+                    bh = int(bb.get("h") or 0)
+                    fsh = int(regions[idx].get("font_size_hint") or 0)
+                    regions[idx] = {
+                        **regions[idx],
+                        "translated": await translator.translate_overlay(
+                            detected, job.target_language,
+                            bbox_w=bw or None, bbox_h=bh or None,
+                            font_size_hint=fsh or None,
+                        ),
+                    }
+                _update(
+                    session, job,
+                    regions=regions,
+                    translated_overlay_text="\n---\n".join(
+                        r.get("translated") or "" for r in regions
+                    ),
+                    status=JobStatus.AWAITING_REVIEW,
+                )
+            else:
+                if not job.detected_overlay_text:
+                    raise RuntimeError("No detected overlay text to translate")
+                translated = await translator.translate_overlay(
+                    job.detected_overlay_text, job.target_language,
+                    bbox_w=job.bbox_width, bbox_h=job.bbox_height,
+                    font_size_hint=job.font_size_hint,
+                )
+                _update(session, job, translated_overlay_text=translated,
+                        status=JobStatus.AWAITING_REVIEW)
         except Exception as e:
             _fail(session, _load(session, job_id), str(e))
 
@@ -228,24 +335,55 @@ async def render_final_video(job_id: int) -> None:
 
             job_dir = storage.job_dir(job_id)
             out_mp4 = job_dir / "final.mp4"
-            text_png: Path | None = None
-            bbox: tuple[int, int, int, int] | None = None
+            overlays: list[tuple[Path, tuple[int, int, int, int]]] = []
 
-            if job.translated_overlay_text and job.bbox_width and job.bbox_height:
+            regions = list(job.regions) if job.regions else []
+            if regions:
+                for i, r in enumerate(regions):
+                    translated = (r.get("translated") or "").strip()
+                    bb = r.get("bbox") or {}
+                    bw, bh = int(bb.get("w") or 0), int(bb.get("h") or 0)
+                    if not translated or bw <= 0 or bh <= 0:
+                        continue
+                    bbox = (int(bb.get("x") or 0), int(bb.get("y") or 0), bw, bh)
+                    png = job_dir / f"overlay_{i}.png"
+                    render_text_png(
+                        translated, job.target_language,
+                        bbox[2], bbox[3],
+                        int(r.get("font_size_hint") or 60),
+                        png,
+                    )
+                    overlays.append((png, bbox))
+            elif job.translated_overlay_text and job.bbox_width and job.bbox_height:
+                # Back-compat: pre-multi-region job. Single overlay from legacy fields.
                 bbox = (job.bbox_x or 0, job.bbox_y or 0, job.bbox_width, job.bbox_height)
-                text_png = job_dir / "overlay.png"
+                png = job_dir / "overlay.png"
                 render_text_png(
-                    job.translated_overlay_text,
-                    job.target_language,
+                    job.translated_overlay_text, job.target_language,
                     bbox[2], bbox[3],
                     job.font_size_hint or 60,
-                    text_png,
+                    png,
+                )
+                overlays.append((png, bbox))
+
+            # Sync sanity check: video and (padded) voiceover should be within 200ms. If they
+                # aren't, the new mix path (sidechain duck + amix=longest, no -shortest) will
+                # still produce a full-length output, but the gap likely points at an earlier
+                # bug in time-stretch or padding.
+            video_dur = probe(Path(job.original_video_path)).duration_s
+            voice_dur = probe_audio_duration(Path(job.generated_voiceover_path))
+            gap = voice_dur - video_dur
+            if abs(gap) > 0.2:
+                log.warning(
+                    "Pre-render duration gap: voiceover=%.2fs video=%.2fs (gap=%+.2fs). "
+                    "Continuing — amix=longest will hold the longer stream.",
+                    voice_dur, video_dur, gap,
                 )
 
             render_final(
                 Path(job.original_video_path),
                 Path(job.generated_voiceover_path),
-                text_png, bbox, out_mp4,
+                overlays, out_mp4,
             )
 
             _update(session, job, final_video_path=str(out_mp4),

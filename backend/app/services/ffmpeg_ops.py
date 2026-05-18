@@ -129,48 +129,82 @@ def time_stretch(
 def render_final(
     video_in: Path,
     audio_in: Path,
-    text_png: Path | None,
-    bbox: tuple[int, int, int, int] | None,
+    overlays: list[tuple[Path, tuple[int, int, int, int]]],
     out_mp4: Path,
 ) -> Path:
-    """Single-pass render: blur original-text region, overlay translated PNG, replace audio.
+    """Single-pass render: blur original-text region(s), overlay translated PNG(s), replace
+    audio with the localized voiceover.
 
-    If bbox or text_png is None, skips the blur+overlay and just replaces audio.
+    Audio: original video audio is dropped entirely. The translated voiceover is the only
+    audio source — coerced to stereo 48 kHz and passed through `loudnorm` to land at -16
+    LUFS / -1.5 dBTP (Meta/YouTube streaming spec). Encoded AAC stereo @ 48 kHz. This is
+    the right default for ads whose source is voiceover-only with no music bed; if a future
+    input has a music/SFX bed worth preserving, that's a separate code path (sidechain duck).
+
+    `overlays` is a list of (text_png_path, (x, y, w, h)) pairs. When empty, no video filter
+    graph is built and the original video stream is copied through.
     """
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     cmd: list[str] = [settings.FFMPEG_BIN, "-y", "-i", str(video_in), "-i", str(audio_in)]
-    if text_png is not None and bbox is not None:
-        x, y, w, h = bbox
-        sigma = max(15, h // 8)
-        cmd += ["-i", str(text_png)]
-        filter_complex = (
-            f"[0:v]split=2[base][region];"
-            f"[region]crop={w}:{h}:{x}:{y},gblur=sigma={sigma}[blurred];"
-            f"[base][blurred]overlay={x}:{y}[covered];"
-            f"[covered][2:v]overlay=x={x}+({w}-overlay_w)/2:y={y}+({h}-overlay_h)/2:format=auto[outv]"
-        )
-        cmd += [
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "1:a",
-        ]
+    # Input indexing: [0]=video, [1]=audio, [2..]=overlay PNGs in order
+    for png, _ in overlays:
+        cmd += ["-i", str(png)]
+
+    steps: list[str] = []
+
+    # ── Video graph ───────────────────────────────────────────────────────
+    if overlays:
+        prev_label = "base"
+        steps.append(f"[0:v]copy[{prev_label}]")
+        for i, (_png, (x, y, w, h)) in enumerate(overlays):
+            sigma = max(15, h // 8)
+            blurred = f"blurred{i}"
+            covered = f"covered{i}"
+            steps.append(f"[0:v]crop={w}:{h}:{x}:{y},gblur=sigma={sigma}[{blurred}]")
+            steps.append(f"[{prev_label}][{blurred}]overlay={x}:{y}[{covered}]")
+            png_idx = i + 2
+            withtext = f"withtext{i}"
+            steps.append(
+                f"[{covered}][{png_idx}:v]overlay="
+                f"x={x}+({w}-overlay_w)/2:y={y}+({h}-overlay_h)/2:format=auto[{withtext}]"
+            )
+            prev_label = withtext
+        video_map = f"[{prev_label}]"
     else:
-        cmd += ["-map", "0:v", "-map", "1:a"]
+        video_map = "0:v"
+
+    # ── Audio graph ───────────────────────────────────────────────────────
+    # Voiceover-only output (original audio dropped). Coerce to stereo 48k and run a single
+    # `loudnorm` pass so loudness is consistent across jobs at the Meta/YouTube spec.
+    fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+    steps.append(f"[1:a]{fmt},loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
 
     cmd += [
+        "-filter_complex", ";".join(steps),
+        "-map", video_map, "-map", "[aout]",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart", "-shortest",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
         str(out_mp4),
     ]
     _run(cmd, timeout=900)
-    validate_video_output(out_mp4)
+
+    # Validate that the output duration covers the source video length — `-shortest` is gone,
+    # so a silent truncation by some upstream length mismatch is now a hard failure.
+    expected_min = probe(video_in).duration_s - 0.3
+    validate_video_output(out_mp4, expected_min_duration=expected_min)
     return out_mp4
 
 
-def validate_video_output(path: Path) -> None:
-    """Gate: FFmpeg can silently produce a container with no video stream. Reject those."""
+def validate_video_output(path: Path, expected_min_duration: float | None = None) -> None:
+    """Gate: FFmpeg can silently produce a container with no video stream. Reject those.
+
+    When `expected_min_duration` is set, also reject outputs shorter than that — useful for
+    catching cases where a length mismatch between inputs would have caused `-shortest` (or an
+    amix=duration=shortest) to clip the result.
+    """
     if not path.exists() or path.stat().st_size < 4096:
         raise FFmpegError(f"Output too small or missing: {path}")
     cmd = [
@@ -186,25 +220,52 @@ def validate_video_output(path: Path) -> None:
     duration = float(data.get("format", {}).get("duration", 0))
     if duration < 0.5:
         raise FFmpegError(f"Output duration suspiciously short ({duration:.2f}s): {path}")
+    if expected_min_duration is not None and duration < expected_min_duration:
+        raise FFmpegError(
+            f"Output duration {duration:.2f}s is below expected minimum "
+            f"{expected_min_duration:.2f}s — output was truncated: {path}"
+        )
 
 
 def replace_audio_only(video_in: Path, audio_in: Path, out_mp4: Path) -> Path:
     """Phase-1 fallback: replace audio without text overlay, used for CLI smoke tests."""
-    return render_final(video_in, audio_in, None, None, out_mp4)
+    return render_final(video_in, audio_in, [], out_mp4)
 
 
 def composite_still(
-    background_png: Path, text_png: Path, bbox: tuple[int, int, int, int], out_png: Path
+    background_png: Path,
+    overlays: list[tuple[Path, tuple[int, int, int, int]]],
+    out_png: Path,
 ) -> Path:
-    """Compose translated text onto an already-blurred background frame. Used for live preview."""
+    """Compose one or more translated-text PNGs onto an already-blurred background frame.
+
+    Each entry is (png, (x, y, w, h)) — the PNG is centered inside the bbox.
+    """
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    x, y, w, h = bbox
-    filter_complex = (
-        f"[0:v][1:v]overlay=x={x}+({w}-overlay_w)/2:y={y}+({h}-overlay_h)/2:format=auto[outv]"
-    )
-    cmd = [
-        settings.FFMPEG_BIN, "-y", "-i", str(background_png), "-i", str(text_png),
-        "-filter_complex", filter_complex, "-map", "[outv]",
+    cmd: list[str] = [settings.FFMPEG_BIN, "-y", "-i", str(background_png)]
+    for png, _ in overlays:
+        cmd += ["-i", str(png)]
+
+    if not overlays:
+        cmd += ["-map", "0:v", "-frames:v", "1", str(out_png)]
+        _run(cmd, timeout=30)
+        return out_png
+
+    steps: list[str] = []
+    prev_label = "base"
+    steps.append(f"[0:v]copy[{prev_label}]")
+    for i, (_png, (x, y, w, h)) in enumerate(overlays):
+        png_idx = i + 1
+        out_label = f"o{i}"
+        steps.append(
+            f"[{prev_label}][{png_idx}:v]overlay="
+            f"x={x}+({w}-overlay_w)/2:y={y}+({h}-overlay_h)/2:format=auto[{out_label}]"
+        )
+        prev_label = out_label
+
+    cmd += [
+        "-filter_complex", ";".join(steps),
+        "-map", f"[{prev_label}]",
         "-frames:v", "1", str(out_png),
     ]
     _run(cmd, timeout=30)
@@ -212,20 +273,36 @@ def composite_still(
 
 
 def build_blurred_background_frame(
-    frame_png: Path, bbox: tuple[int, int, int, int], out_png: Path
+    frame_png: Path,
+    bboxes: list[tuple[int, int, int, int]],
+    out_png: Path,
 ) -> Path:
-    """Pre-blur the bbox region of a still frame and save it. Cached per-job for fast previews."""
+    """Pre-blur one or more bbox regions of a still frame and save it. Cached per-job."""
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    x, y, w, h = bbox
-    sigma = max(15, h // 8)
-    filter_complex = (
-        f"[0:v]split=2[base][region];"
-        f"[region]crop={w}:{h}:{x}:{y},gblur=sigma={sigma}[blurred];"
-        f"[base][blurred]overlay={x}:{y}[outv]"
-    )
+    if not bboxes:
+        # Nothing to blur — just copy the frame so callers can rely on out_png existing.
+        cmd = [
+            settings.FFMPEG_BIN, "-y", "-i", str(frame_png),
+            "-frames:v", "1", str(out_png),
+        ]
+        _run(cmd, timeout=30)
+        return out_png
+
+    steps: list[str] = []
+    prev_label = "base"
+    steps.append(f"[0:v]copy[{prev_label}]")
+    for i, (x, y, w, h) in enumerate(bboxes):
+        sigma = max(15, h // 8)
+        blurred = f"blurred{i}"
+        covered = f"covered{i}"
+        steps.append(f"[0:v]crop={w}:{h}:{x}:{y},gblur=sigma={sigma}[{blurred}]")
+        steps.append(f"[{prev_label}][{blurred}]overlay={x}:{y}[{covered}]")
+        prev_label = covered
+
     cmd = [
         settings.FFMPEG_BIN, "-y", "-i", str(frame_png),
-        "-filter_complex", filter_complex, "-map", "[outv]",
+        "-filter_complex", ";".join(steps),
+        "-map", f"[{prev_label}]",
         "-frames:v", "1", str(out_png),
     ]
     _run(cmd, timeout=30)

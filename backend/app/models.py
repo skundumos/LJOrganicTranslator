@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import Enum
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -45,6 +46,13 @@ class VideoJob(SQLModel, table=True):
     bbox_width: int | None = None
     bbox_height: int | None = None
     font_size_hint: int | None = None
+
+    # Multi-region overlay. Each entry:
+    #   {"detected": str, "translated": str | None,
+    #    "bbox": {"x": int, "y": int, "w": int, "h": int}, "font_size_hint": int}
+    # Ordered top-first, bottom-second. Legacy single-bbox fields above mirror regions[0]
+    # for back-compat with code paths that haven't been updated yet.
+    regions: list[dict] | None = Field(default=None, sa_column=Column(JSON))
 
     final_video_path: str | None = None
     status: JobStatus = Field(default=JobStatus.CREATED)

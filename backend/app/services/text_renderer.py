@@ -95,8 +95,14 @@ def render_text_png(
     bbox_h: int,
     font_size_hint: int,
     out_png: Path,
-) -> Path:
-    """Render `text` for `language_code` to a transparent PNG sized to fit within bbox."""
+) -> tuple[Path, int]:
+    """Render `text` for `language_code` to a transparent PNG sized to fit within bbox.
+
+    Returns (out_png, chosen_font_px) — the second element is the actual font size used
+    after the auto-fit binary search, in screen pixels (already de-supersampled). Callers
+    can use it to detect overflow (when the search pinned at the 24px floor) and retry
+    the upstream translation with a tighter character budget.
+    """
     out_png.parent.mkdir(parents=True, exist_ok=True)
     lang = get_language(language_code)
     bcp47 = lang["bcp47"]
@@ -187,6 +193,7 @@ def render_text_png(
         )
 
     final.save(out_png, "PNG")
+    chosen_px = chosen_size // SUPERSAMPLE
     log.info("Rendered text PNG %s size=(%d,%d) font_px=%d lines=%d",
-             out_png.name, bbox_w, bbox_h, chosen_size // SUPERSAMPLE, len(lines))
-    return out_png
+             out_png.name, bbox_w, bbox_h, chosen_px, len(lines))
+    return out_png, chosen_px

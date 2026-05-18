@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     CLAUDE_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "anthropic/claude-sonnet-4.5"
     SARVAM_API_KEY: str = ""
     ELEVENLABS_API_KEY: str = ""  # legacy — kept for back-compat, no longer used by default
     GOOGLE_VISION_API_KEY: str = ""
