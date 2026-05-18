@@ -1,0 +1,90 @@
+# Render.com blueprint — deploys backend (Docker, FFmpeg+libraqm) and frontend (Next.js).
+#
+# Goal: behave like your localhost — always-on, persistent storage, no cold starts.
+# That requires the Starter plan ($7/mo per service = $14/mo total + $0.25/GB for disk).
+# Render Starter accounts need a credit card on file (no charge until you deploy paid).
+#
+# To deploy:
+#   1. Push this repo to GitHub (private or public — keys are embedded by request).
+#   2. https://dashboard.render.com/blueprints → New Blueprint Instance → pick this repo.
+#   3. Render reads this file and creates both services.
+#
+# Service URLs after deploy:
+#   Backend  : https://adlocalizer-api.onrender.com
+#   Frontend : https://adlocalizer-web.onrender.com
+#
+# If those service names are taken globally on Render, Render suffixes them. After the
+# first deploy, update CORS_ORIGINS on the backend and NEXT_PUBLIC_API_BASE on the
+# frontend to the actual generated URLs (Dashboard → service → Environment), then
+# redeploy. Both services rebuild fast (<2 min after first cold build).
+#
+# To save money, switch both `plan: starter` → `plan: free` (no card needed). Caveats:
+#   - 15-min idle sleep → first hit after sleep is ~30s cold start
+#   - No persistent disk → SQLite DB + storage reset on every restart (jobs vanish)
+#   - This is NOT localhost-like; only suitable for demos where you finish in one session.
+
+services:
+  # ─────────────────────────────────────────── Backend (FastAPI + FFmpeg)
+  - type: web
+    name: adlocalizer-api
+    runtime: docker
+    region: oregon
+    plan: starter
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: adlocalizer-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      # --- LLM / STT / TTS / OCR keys (same values as backend/.env) ---
+      - key: GROQ_API_KEY
+        value: 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
+      - key: SARVAM_API_KEY
+        value: sk_ttoctp1f_d32SKEEY0OMzE5tezmCYcJAv
+      - key: ELEVENLABS_API_KEY
+        value: sk_8b4ca812e3e97e0c954690c0b611cf5192db1aec88b0f293
+      - key: OCR_SPACE_API_KEY
+        value: K87129332388957
+      - key: OPENROUTER_API_KEY
+        value: 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
+      - key: OPENROUTER_MODEL
+        value: anthropic/claude-sonnet-4.5
+      - key: CLAUDE_API_KEY
+        value: ""
+      - key: OPENAI_API_KEY
+        value: ""
+      - key: GOOGLE_VISION_API_KEY
+        value: ""
+
+      # --- Runtime config ---
+      - key: STORAGE_DIR
+        value: /data/storage
+      - key: DB_URL
+        value: sqlite:////data/adlocalizer.db
+      - key: MAX_UPLOAD_MB
+        value: "200"
+      - key: MAX_VIDEO_DURATION_S
+        value: "60"
+      - key: CORS_ORIGINS
+        value: https://adlocalizer-web.onrender.com
+      # FFMPEG_BIN / FFPROBE_BIN intentionally unset — defaults to `ffmpeg`/`ffprobe`
+      # which the Dockerfile installs into $PATH via apt-get.
+
+  # ─────────────────────────────────────────── Frontend (Next.js 15)
+  - type: web
+    name: adlocalizer-web
+    runtime: node
+    rootDir: frontend
+    region: oregon
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npx next start -H 0.0.0.0 -p $PORT
+    autoDeploy: true
+    envVars:
+      - key: NEXT_PUBLIC_API_BASE
+        value: https://adlocalizer-api.onrender.com
+      - key: NODE_VERSION
+        value: "20"
