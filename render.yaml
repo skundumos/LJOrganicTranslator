@@ -29,15 +29,11 @@ services:
     name: adlocalizer-api
     runtime: docker
     region: oregon
-    plan: starter
+    plan: free
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /api/health
     autoDeploy: true
-    disk:
-      name: adlocalizer-data
-      mountPath: /data
-      sizeGB: 5
     envVars:
       # --- LLM / STT / TTS / OCR keys (same values as backend/.env) ---
       - key: GROQ_API_KEY
@@ -61,9 +57,9 @@ services:
 
       # --- Runtime config ---
       - key: STORAGE_DIR
-        value: /data/storage
+        value: /tmp/storage
       - key: DB_URL
-        value: sqlite:////data/adlocalizer.db
+        value: sqlite:////tmp/adlocalizer.db
       - key: MAX_UPLOAD_MB
         value: "200"
       - key: MAX_VIDEO_DURATION_S
@@ -79,7 +75,7 @@ services:
     runtime: node
     rootDir: frontend
     region: oregon
-    plan: starter
+    plan: free
     buildCommand: npm install && npm run build
     startCommand: npx next start -H 0.0.0.0 -p $PORT
     autoDeploy: true
